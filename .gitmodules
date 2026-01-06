@@ -1,0 +1,3 @@
+[submodule "dfim"]
+	path = dfim
+	url = git@github.com:kundajelab/dfim.git
