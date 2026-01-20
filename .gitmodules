@@ -1,3 +1,6 @@
 [submodule "dfim"]
 	path = dfim
 	url = git@github.com:kundajelab/dfim.git
+[submodule "seam_repo/seam-nn"]
+	path = seam_repo/seam-nn
+	url = git@github.com:evanseitz/seam-nn.git
