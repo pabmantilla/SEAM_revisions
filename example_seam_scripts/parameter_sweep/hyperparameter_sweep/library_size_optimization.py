@@ -22,6 +22,7 @@ from seam.logomaker_batch.batch_logo import BatchLogo
 
 library_size_sweep = [100000, 75000, 50000, 25000, 10000, 5000, 1000]
 
+# baseline hyperparameters
 attribution_method = 'deepshap'
 cluster_method = 'hiearchical'
 cluster_number = 30
@@ -38,7 +39,7 @@ with open('../libraries/hyperparam_libraries.pkl', 'rb') as f:
     dev_loci = libraries['dev']
     hk_loci = libraries['hk']
 
-if len(dev_loci)==6 and len(hk_loci) ==8:
+if len(dev_loci)==8 and len(hk_loci) ==8:
     print("Size of test library validated.")
 else:
     print("Wrong Library!!!")
@@ -65,53 +66,59 @@ print("Model loaded successfully!")
 
 ## load DeepSHAP
 ## load deepSHAP
-def seam_deepshap(x_mut, task_index):
+def seam_deepshap(x_mut, task_index, checkpoint_path=None, checkpoint_every=5000):
+    """Compute DeepSHAP attributions with optional checkpointing."""
     x_ref = x_mut
+    print(f"Computing attributions for task_index: {task_index}")
     import time
     import tensorflow as tf
     from keras.models import model_from_json
     import numpy as np
     import random
 
-    # Configuration
-    attribution_method = 'deepshap'  # or 'gradientshap', 'integratedgradients', etc.
-    task_index = task_index  # 0 for Dev, 1 for Hk
-    gpu = 0  # GPU device number
-    save_data = True
-    save_path = './attributions'  # Where to save results
-    os.makedirs(save_path, exist_ok=True)
+    # Check for existing checkpoint
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        with h5py.File(checkpoint_path, 'r') as f:
+            start_idx = f.attrs['last_completed_idx'] + 1
+            attributions_partial = f['attributions'][:start_idx]
+        print(f"Resuming from checkpoint at index {start_idx}")
+    else:
+        start_idx = 0
+        attributions_partial = None
 
+    # If already complete, return
+    if start_idx >= len(x_mut):
+        print("Attributions already complete, loading from checkpoint")
+        with h5py.File(checkpoint_path, 'r') as f:
+            return f['attributions'][:]
+
+    # Configuration
+    attribution_method = 'deepshap'
+    gpu = 0
+    
     # Model paths
-    keras_model_json = 'models/deepstarr/deepstarr.model.json'
-    keras_model_weights = 'models/deepstarr/deepstarr.model.h5'
+    keras_model_json = '../models/deepstarr/deepstarr.model.json'
+    keras_model_weights = '../models/deepstarr/deepstarr.model.h5'
 
     if attribution_method == 'deepshap':
         try:
-            # Disable eager execution first
             tf.compat.v1.disable_eager_execution()
             tf.compat.v1.disable_v2_behavior()
             print("TensorFlow eager execution disabled for DeepSHAP compatibility")
             
-            # Import SHAP to configure handlers
             try:
                 import shap
             except ImportError:
-                print("ERROR: SHAP package is not installed.")
-                print("To install SHAP for DeepSHAP attribution, run:")
-                print("pip install kundajelab-shap==1")
                 raise ImportError("SHAP package required for DeepSHAP attribution")
             
-            # Handle AddV2 operation (element-wise addition) as a linear operation
             shap.explainers.deep.deep_tf.op_handlers["AddV2"] = shap.explainers.deep.deep_tf.passthrough
 
-            # Load the model after eager execution is disabled
             keras_model = model_from_json(open(keras_model_json).read(), custom_objects={'Functional': tf.keras.Model})
             np.random.seed(113)
             random.seed(0)
             keras_model.load_weights(keras_model_weights)
             model = keras_model
             
-            # Rebuild model to ensure proper graph construction
             _ = model(tf.keras.Input(shape=model.input_shape[1:]))
             
         except ImportError:
@@ -120,9 +127,7 @@ def seam_deepshap(x_mut, task_index):
             print(f"Warning: Could not setup TensorFlow for DeepSHAP. Error: {e}")
             print("DeepSHAP may not work properly.")
         
-        # Create attributer for DeepSHAP
         def deepstarr_compress(x):
-            """DeepSTARR compression function for DeepSHAP."""
             if hasattr(x, 'outputs'):
                 return tf.reduce_sum(x.outputs[task_index], axis=-1)
             else:
@@ -138,50 +143,243 @@ def seam_deepshap(x_mut, task_index):
         attributer.show_params(attribution_method)
 
         t1 = time.time()
-        attributions = attributer.compute(
-            x_ref=x_ref,
-            x=x_mut,
-            save_window=None,
-            batch_size=16,
-            gpu=gpu,
-        )
+        
+        # Process in chunks with checkpointing
+        n_samples = len(x_mut)
+        all_attributions = []
+        
+        # Add previously computed attributions if resuming
+        if attributions_partial is not None:
+            all_attributions.append(attributions_partial)
+        
+        for chunk_start in range(start_idx, n_samples, checkpoint_every):
+            chunk_end = min(chunk_start + checkpoint_every, n_samples)
+            print(f"\nProcessing samples {chunk_start} to {chunk_end} of {n_samples}")
+            
+            x_chunk = x_mut[chunk_start:chunk_end]
+            x_ref_chunk = x_chunk
+            
+            chunk_attributions = attributer.compute(
+                x_ref=x_ref_chunk,
+                x=x_chunk,
+                save_window=None,
+                batch_size=64,
+                gpu=gpu,
+            )
+            
+            all_attributions.append(chunk_attributions)
+            
+            # Save checkpoint
+            if checkpoint_path:
+                attributions_so_far = np.concatenate(all_attributions, axis=0)
+                os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                with h5py.File(checkpoint_path, 'w') as f:
+                    f.create_dataset('attributions', data=attributions_so_far, compression='gzip', compression_opts=4)
+                    f.attrs['last_completed_idx'] = chunk_end - 1
+                    f.attrs['n_samples'] = n_samples
+                print(f"Checkpoint saved at index {chunk_end - 1}")
+        
+        attributions = np.concatenate(all_attributions, axis=0)
+        
         t2 = time.time() - t1
         print(f'Attribution time: {t2/60:.2f} minutes')
-    else:
-        # Use unified Attributer for other methods
-        attributer = Attributer(
-            model,
-            method=attribution_method,
-            task_index=task_index,
-            compress_fun=lambda x: x,
-            pred_fun=model.predict_on_batch,
-        )
-
-        attributer.show_params(attribution_method)
-
-        t1 = time.time()
-        attributions = attributer.compute(
-            x_ref=x_ref,
-            x=x_mut,
-            save_window=None,
-            batch_size=256,
-            gpu=gpu
-        )
-        t2 = time.time() - t1
-        print(f'Attribution time: {t2/60:.2f} minutes')
+        
+        return attributions
 
 
-## START SEAM
+### START SEAM
 
-tasks = [0,1]
+## Helper functions
+
+def load_library_100k(task, seq_idx):
+    """Load the full 100K library."""
+    filepath = f'mutagenisis_library/{task}/seq_{seq_idx}/100K.h5'
+    with h5py.File(filepath, 'r') as f:
+        sequences = f['sequences'][:]
+        predictions = f['predictions'][:]
+        original_idx = f.attrs['original_idx']
+    return sequences, predictions, original_idx
+
+
+def load_library(task, seq_idx, size_label):
+    """Load a specific size library including subset_idx."""
+    filepath = f'mutagenisis_library/{task}/seq_{seq_idx}/{size_label}.h5'
+    with h5py.File(filepath, 'r') as f:
+        sequences = f['sequences'][:]
+        predictions = f['predictions'][:]
+        original_idx = f.attrs['original_idx']
+        subset_idx = f['subset_idx'][:] if 'subset_idx' in f else None
+    return sequences, predictions, original_idx, subset_idx
+
+def save_attributions(filepath, attributions, original_idx, subset_idx=None):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with h5py.File(filepath, 'w') as f:
+        f.create_dataset('attributions', data=attributions, compression='gzip', compression_opts=4)
+        if subset_idx is not None:
+            f.create_dataset('subset_idx', data=subset_idx, compression='gzip', compression_opts=4)
+        f.attrs['original_idx'] = original_idx
+        f.attrs['n_samples'] = len(attributions)
+
+def load_attributions(filepath):
+    with h5py.File(filepath, 'r') as f:
+        return f['attributions'][:]
+
+def attributions_exist(task, seq_idx):
+    """Check if 100K attributions already exist."""
+    filepath = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/100K.h5'
+    return os.path.exists(filepath)
+
+# Subset sizes and labels
+subset_sizes = {
+    '100K': 100000,
+    '75K': 75000,
+    '50K': 50000,
+    '25K': 25000,
+    '10K': 10000,
+    '5K': 5000,
+    '1K': 1000
+}
+
+tasks = ['Dev', 'Hk']
+
+def all_attributions_exist(task, seq_idx, subset_sizes):
+    """Check if ALL attribution files exist for a given task/seq."""
+    for size_label in subset_sizes.keys():
+        attr_path = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/{size_label}.h5'
+        if not os.path.exists(attr_path):
+            return False
+    return True
 
 for task in tasks:
+    task_index = 0 if task == 'Dev' else 1
 
-    # Squid library creation
+    task_dir = f'mutagenisis_library/{task}'
+    seq_folders = [f for f in os.listdir(task_dir) if f.startswith('seq_')]
+
+    for seq_folder in seq_folders:
+        seq_idx = int(seq_folder.split('_')[1])
+        print(f"\n{'='*50}")
+        print(f"Processing {task} seq_{seq_idx}")
+        print(f"{'='*50}")
+
+        # Quick check: skip entirely if ALL attribution files already exist
+        if all_attributions_exist(task, seq_idx, subset_sizes):
+            print(f"All attribution files exist for {task} seq_{seq_idx} - skipping")
+            continue
+
+        # Load full 100K library
+        seqs_100k, preds_100k, orig_idx = load_library_100k(task, seq_idx)
+        
+        # Compute or load 100K attributions
+        attr_100k_path = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/100K.h5'
+        if attributions_exist(task, seq_idx):
+            print(f"Loading existing 100K attributions...")
+            attributions_100k = load_attributions(attr_100k_path)
+        else:
+                    
+            print(f"Computing attributions for 100K samples...")
+            checkpoint_path = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/checkpoint.h5'
+            attributions_100k = seam_deepshap(seqs_100k, task_index, 
+                                            checkpoint_path=checkpoint_path,
+                                            checkpoint_every=5000)
+            save_attributions(attr_100k_path, attributions_100k, orig_idx, subset_idx=None)
+            # Optionally remove checkpoint after successful completion
+            if os.path.exists(checkpoint_path):
+                os.remove(checkpoint_path)
+            print(f"Saved 100K attributions")
+        
+        # Process each size
+        for size_label, size in subset_sizes.items():
+            print(f"\n--- {size_label} ---")
+
+            # Check if attribution file already exists - skip if so
+            attr_path = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/{size_label}.h5'
+            if os.path.exists(attr_path):
+                print(f"Skipping {size_label} - attribution file already exists")
+                continue
+
+            # Load the subset_idx from the mutagenesis library (source of truth)
+            _, _, _, subset_idx = load_library(task, seq_idx, size_label)
+
+            if size_label == '100K':
+                seqs = seqs_100k
+                preds = preds_100k
+                attrs = attributions_100k
+            else:
+                # Use the EXACT subset_idx from the mutagenesis library
+                seqs = seqs_100k[subset_idx]
+                preds = preds_100k[subset_idx]
+                attrs = attributions_100k[subset_idx]
+
+            # Save attribution subset
+            save_attributions(attr_path, attrs, orig_idx, subset_idx=subset_idx)
+
+            print(f"Seqs: {seqs.shape}, Preds: {preds.shape}, Attrs: {attrs.shape}")
+
+## Cluster with Hierarchical 
+
+def cluster_and_save(attrs, task, seq_idx, size_label, n_clusters=30):
+    """Cluster attributions and save results. Skip if already exists."""
+
+    cluster_dir = f'results/library_size_sweep/cluster_metadata/{task}/seq_{seq_idx}/{size_label}'
+    linkage_path = os.path.join(cluster_dir, 'hierarchical_linkage_ward.npy')
+    labels_path = os.path.join(cluster_dir, 'cluster_labels.npy')
     
+    # Skip if already exists
+    if os.path.exists(linkage_path) and os.path.exists(labels_path):
+        print(f"Skipping clustering for {size_label} - already exists")
+        return np.load(linkage_path), np.load(labels_path)
+    
+    os.makedirs(cluster_dir, exist_ok=True)
+
+    import time
+    print(f"Clustering {len(attrs)} samples...")
+    t_start = time.time()
+
+    clusterer = Clusterer(attrs, gpu=True)
+
+    linkage = clusterer.cluster(
+        method='hierarchical',
+        link_method='ward',
+        batch_size=20000
+    )
+    print(f"Clustering completed in {(time.time() - t_start)/60:.1f} min")
+    
+    labels, cut_level = clusterer.get_cluster_labels(
+        linkage,
+        criterion='maxclust',
+        n_clusters=n_clusters
+    )
+    
+    np.save(linkage_path, linkage)
+    np.save(labels_path, labels)
+    print(f"Saved clustering for {size_label}")
+    
+    return linkage, labels
 
 
-
+# Run clustering for all sizes
+for task in tasks:
+    task_dir = f'mutagenisis_library/{task}'
+    seq_folders = [f for f in os.listdir(task_dir) if f.startswith('seq_')]
+    
+    for seq_folder in seq_folders:
+        seq_idx = int(seq_folder.split('_')[1])
+        print(f"\n{'='*50}")
+        print(f"Clustering {task} seq_{seq_idx}")
+        print(f"{'='*50}")
+        
+        for size_label in reversed(list(subset_sizes.keys())):
+            print(f"\n--- {size_label} ---")
+            
+            # Load attributions
+            attr_path = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/{size_label}.h5'
+            if not os.path.exists(attr_path):
+                print(f"Skipping {size_label} - no attributions found")
+                continue
+            
+            attrs = load_attributions(attr_path)
+            linkage, labels = cluster_and_save(attrs, task, seq_idx, size_label, n_clusters=cluster_number)
 
 
 
