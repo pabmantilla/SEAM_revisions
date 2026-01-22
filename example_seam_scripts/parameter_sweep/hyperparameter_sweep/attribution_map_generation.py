@@ -44,6 +44,16 @@ from keras.models import model_from_json
 import seam
 from seam import Attributer
 
+# =============================================================================
+# GPU VERIFICATION
+# =============================================================================
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    print(f"GPU available: {len(gpus)} device(s) detected")
+    for gpu in gpus:
+        print(f"  - {gpu.name}")
+else:
+    print("WARNING: No GPU detected! Running on CPU will be very slow.")
 
 # =============================================================================
 # CONFIGURATION
@@ -51,7 +61,7 @@ from seam import Attributer
 
 # Attribution methods to process (in order)
 # Each method will be processed completely before moving to the next
-METHODS = ['deepshap', 'saliency', 'ism', 'intgrad']
+METHODS = ['deepSHAP', 'saliency', 'intgrad', 'ism']
 
 # Subset sizes - MUST match library_size_optimization.py exactly
 # The order matters: 100K first, then decreasing sizes
@@ -453,12 +463,15 @@ def compute_saliency(x_mut, task_index, checkpoint_path=None, checkpoint_every=5
 
     # -------------------------------------------------------------------------
     # CREATE ATTRIBUTER
+    # Note: For non-deepshap methods, use identity compress_fun (lambda x: x)
+    # and provide pred_fun for consistency with example_deepstarr_local scripts
     # -------------------------------------------------------------------------
     attributer = Attributer(
         model,
         method='saliency',
         task_index=task_index,
-        compress_fun=tf.math.reduce_mean,
+        compress_fun=lambda x: x,  # Identity function - matches example scripts
+        pred_fun=model.predict_on_batch,  # Required for consistency
         gpu=True
     )
 
@@ -549,12 +562,13 @@ def compute_ism(x_mut, task_index, checkpoint_path=None, checkpoint_every=5000):
     # -------------------------------------------------------------------------
     # CREATE ATTRIBUTER
     # ISM requires pred_fun for forward-pass predictions
+    # Note: Use identity compress_fun to match example scripts
     # -------------------------------------------------------------------------
     attributer = Attributer(
         model,
         method='ism',
         task_index=task_index,
-        compress_fun=tf.math.reduce_mean,
+        compress_fun=lambda x: x,  # Identity function - matches example scripts
         pred_fun=model.predict_on_batch,  # Required for ISM
         gpu=True
     )
@@ -580,7 +594,7 @@ def compute_ism(x_mut, task_index, checkpoint_path=None, checkpoint_every=5000):
         # ISM uses smaller batch size due to memory requirements
         chunk_attributions = attributer.compute(
             x=x_chunk,
-            batch_size=32,
+            batch_size=64,
             gpu=GPU_DEVICE,
             log2fc=False,  # Use difference, not log2 fold change
         )
@@ -647,12 +661,15 @@ def compute_intgrad(x_mut, task_index, checkpoint_path=None, checkpoint_every=50
 
     # -------------------------------------------------------------------------
     # CREATE ATTRIBUTER
+    # Note: For non-deepshap methods, use identity compress_fun (lambda x: x)
+    # and provide pred_fun for consistency with example_deepstarr_local scripts
     # -------------------------------------------------------------------------
     attributer = Attributer(
         model,
         method='intgrad',
         task_index=task_index,
-        compress_fun=tf.math.reduce_mean,
+        compress_fun=lambda x: x,  # Identity function - matches example scripts
+        pred_fun=model.predict_on_batch,  # Required for consistency
         gpu=True
     )
 
@@ -710,7 +727,7 @@ def compute_intgrad(x_mut, task_index, checkpoint_path=None, checkpoint_every=50
 
 # Map method names to their compute functions
 COMPUTE_FUNCTIONS = {
-    'deepshap': compute_deepshap,
+    'deepSHAP': compute_deepshap,
     'saliency': compute_saliency,
     'ism': compute_ism,
     'intgrad': compute_intgrad,

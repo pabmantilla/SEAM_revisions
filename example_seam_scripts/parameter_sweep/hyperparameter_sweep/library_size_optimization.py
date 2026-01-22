@@ -15,7 +15,7 @@ from keras.models import model_from_json
 
 # SEAM imports
 import seam
-from seam import Compiler, Attributer, Clusterer, MetaExplainer, Identifier
+from seam import Compiler, Attributer, Clusterer, MetaExplainer
 from seam.logomaker_batch.batch_logo import BatchLogo
 
 ## This script will sweep through the library sizes with baseline hyperparameters
@@ -381,6 +381,139 @@ for task in tasks:
             attrs = load_attributions(attr_path)
             linkage, labels = cluster_and_save(attrs, task, seq_idx, size_label, n_clusters=cluster_number)
 
+
+## MetaExplainer - Generate MSM from cluster metadata
+
+def generate_and_save_msm(task, seq_idx, size_label, n_clusters=30, gpu=True):
+    """Load cluster metadata and generate MSM."""
+
+    # Define paths
+    cluster_dir = f'results/library_size_sweep/cluster_metadata/{task}/seq_{seq_idx}/{size_label}'
+    linkage_path = os.path.join(cluster_dir, 'hierarchical_linkage_ward.npy')
+    labels_path = os.path.join(cluster_dir, 'cluster_labels.npy')
+
+    csm_dir = f'results/library_size_sweep/CSM/{task}/seq_{seq_idx}/{size_label}'
+    msm_path = os.path.join(csm_dir, 'msm.csv')
+
+    # Skip if MSM already exists
+    if os.path.exists(msm_path):
+        print(f"Skipping {task}/seq_{seq_idx}/{size_label} - MSM already exists")
+        return None
+
+    # Check if cluster metadata exists
+    if not os.path.exists(linkage_path) or not os.path.exists(labels_path):
+        print(f"Skipping {task}/seq_{seq_idx}/{size_label} - cluster metadata not found")
+        return None
+
+    # Load cluster metadata
+    linkage = np.load(linkage_path)
+    labels = np.load(labels_path)
+
+    # Load attributions
+    attr_path = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/{size_label}.h5'
+    if not os.path.exists(attr_path):
+        print(f"Skipping {task}/seq_{seq_idx}/{size_label} - attributions not found")
+        return None
+    attributions = load_attributions(attr_path)
+
+    # Load sequences and predictions
+    seqs, preds, orig_idx, subset_idx = load_library(task, seq_idx, size_label)
+
+    # Get reference sequence (first sequence, index 0)
+    x_ref = seqs[0:1]
+
+    # Create Clusterer and set cluster_labels
+    clusterer = Clusterer(attributions, gpu=gpu)
+    clusterer.cluster_labels = labels
+
+    # Create mave_df using Compiler
+    compiler = Compiler(
+        x=seqs,
+        y=preds,
+        x_ref=x_ref,
+        alphabet=['A', 'C', 'G', 'T'],
+        gpu=gpu
+    )
+    mave_df = compiler.compile()
+
+    # Initialize MetaExplainer
+    meta = MetaExplainer(
+        clusterer=clusterer,
+        mave_df=mave_df,
+        attributions=attributions,
+        sort_method='median',
+        ref_idx=0,
+        mut_rate=mutation_rate
+    )
+
+    # Generate MSM
+    msm = meta.generate_msm(gpu=gpu)
+
+    # Save outputs
+    os.makedirs(csm_dir, exist_ok=True)
+
+    # Save MSM
+    msm.to_csv(msm_path, index=False)
+    print(f"Saved MSM to {msm_path}")
+
+    # Compute and save cluster statistics
+    cluster_stats = []
+    for k in meta.cluster_indices:
+        k_mask = meta.mave['Cluster'] == k
+        k_scores = meta.mave.loc[k_mask, 'DNN']
+        cluster_stats.append({
+            'Cluster': k,
+            'Occupancy': k_mask.sum(),
+            'Median_DNN': k_scores.median(),
+            'Mean_DNN': k_scores.mean(),
+            'Std_DNN': k_scores.std()
+        })
+    cluster_stats_df = pd.DataFrame(cluster_stats)
+    cluster_stats_df.to_csv(os.path.join(csm_dir, 'cluster_stats.csv'), index=False)
+    print(f"Saved cluster stats")
+
+    # Add Cluster_Sorted column to membership_df (same logic as plot_cluster_stats)
+    if meta.cluster_order is not None:
+        mapping_dict = {old_k: new_k for new_k, old_k in enumerate(meta.cluster_order)}
+        meta.membership_df['Cluster_Sorted'] = meta.membership_df['Cluster'].map(mapping_dict)
+
+    # Save membership dataframe
+    meta.membership_df.to_csv(os.path.join(csm_dir, 'membership_df.csv'), index=False)
+    print(f"Saved membership dataframe")
+
+    # Save WT cluster info (ref_idx=0 is the WT sequence)
+    ref_cluster = meta.membership_df.loc[0, 'Cluster']
+    ref_cluster_sorted = meta.membership_df.loc[0, 'Cluster_Sorted'] if 'Cluster_Sorted' in meta.membership_df.columns else ref_cluster
+    wt_info = pd.DataFrame({
+        'ref_idx': [0],
+        'WT_Cluster': [ref_cluster],
+        'WT_Cluster_Sorted': [ref_cluster_sorted]
+    })
+    wt_info.to_csv(os.path.join(csm_dir, 'wt_cluster_info.csv'), index=False)
+    print(f"Saved WT cluster info")
+
+    return msm
+
+
+# Run MSM generation for all available cluster metadata
+for task in tasks:
+    cluster_task_dir = f'results/library_size_sweep/cluster_metadata/{task}'
+
+    if not os.path.exists(cluster_task_dir):
+        print(f"Skipping {task} - no cluster metadata directory")
+        continue
+
+    seq_folders = [f for f in os.listdir(cluster_task_dir) if f.startswith('seq_')]
+
+    for seq_folder in seq_folders:
+        seq_idx = int(seq_folder.split('_')[1])
+        print(f"\n{'='*50}")
+        print(f"Generating MSM for {task} seq_{seq_idx}")
+        print(f"{'='*50}")
+
+        for size_label in reversed(list(subset_sizes.keys())):
+            print(f"\n--- {size_label} ---")
+            generate_and_save_msm(task, seq_idx, size_label, n_clusters=cluster_number, gpu=True)
 
 
 
