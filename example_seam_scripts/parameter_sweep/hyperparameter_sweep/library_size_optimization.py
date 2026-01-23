@@ -7,7 +7,7 @@ import h5py
 import random
 from urllib.request import urlretrieve
 import matplotlib.pyplot as plt
-
+from scipy.stats import spearmanr, pearsonr
 
 # TensorFlow/Keras imports for model loading
 import tensorflow as tf
@@ -354,30 +354,50 @@ def cluster_and_save(attrs, task, seq_idx, size_label, n_clusters=30):
     np.save(linkage_path, linkage)
     np.save(labels_path, labels)
     print(f"Saved clustering for {size_label}")
-    
+
     return linkage, labels
+
+
+def all_cluster_files_exist(task, seq_idx):
+    """Check if all cluster files already exist for a given task/seq."""
+    for size_label in subset_sizes.keys():
+        # Only check if attributions exist - if attributions don't exist, we don't need cluster files
+        attr_path = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/{size_label}.h5'
+        if os.path.exists(attr_path):
+            cluster_dir = f'results/library_size_sweep/cluster_metadata/{task}/seq_{seq_idx}/{size_label}'
+            linkage_path = os.path.join(cluster_dir, 'hierarchical_linkage_ward.npy')
+            labels_path = os.path.join(cluster_dir, 'cluster_labels.npy')
+            if not os.path.exists(linkage_path) or not os.path.exists(labels_path):
+                return False
+    return True
 
 
 # Run clustering for all sizes
 for task in tasks:
     task_dir = f'mutagenisis_library/{task}'
     seq_folders = [f for f in os.listdir(task_dir) if f.startswith('seq_')]
-    
+
     for seq_folder in seq_folders:
         seq_idx = int(seq_folder.split('_')[1])
+
+        # Skip if all cluster files already exist
+        if all_cluster_files_exist(task, seq_idx):
+            print(f"Skipping {task}/seq_{seq_idx} - all cluster files already exist")
+            continue
+
         print(f"\n{'='*50}")
         print(f"Clustering {task} seq_{seq_idx}")
         print(f"{'='*50}")
-        
+
         for size_label in reversed(list(subset_sizes.keys())):
             print(f"\n--- {size_label} ---")
-            
+
             # Load attributions
             attr_path = f'attribution_map_libraries/deepSHAP/{task}/seq_{seq_idx}/{size_label}.h5'
             if not os.path.exists(attr_path):
                 print(f"Skipping {size_label} - no attributions found")
                 continue
-            
+
             attrs = load_attributions(attr_path)
             linkage, labels = cluster_and_save(attrs, task, seq_idx, size_label, n_clusters=cluster_number)
 
@@ -516,5 +536,368 @@ for task in tasks:
             generate_and_save_msm(task, seq_idx, size_label, n_clusters=cluster_number, gpu=True)
 
 
+## Compute variance summary for each MSM (per seq, per library size)
+def compute_and_save_variance_summary(task, seq_idx, size_label):
+    """Load MSM and compute variance of entropy across clusters for each position."""
+
+    csm_dir = f'results/library_size_sweep/CSM/{task}/seq_{seq_idx}/{size_label}'
+    msm_path = os.path.join(csm_dir, 'msm.csv')
+    variance_path = os.path.join(csm_dir, 'variance_summary.csv')
+
+    # Skip if variance summary already exists
+    if os.path.exists(variance_path):
+        print(f"Skipping {task}/seq_{seq_idx}/{size_label} - variance summary already exists")
+        return None
+
+    # Check if MSM exists
+    if not os.path.exists(msm_path):
+        print(f"Skipping {task}/seq_{seq_idx}/{size_label} - MSM not found")
+        return None
+
+    # Load MSM
+    msm = pd.read_csv(msm_path)
+
+    # Pivot to get Cluster x Position matrix of entropy values
+    entropy_matrix = msm.pivot(index='Cluster', columns='Position', values='Entropy')
+
+    # Compute variance across clusters for each position
+    variance_per_position = entropy_matrix.var(axis=0)
+
+    # Create DataFrame and save
+    variance_df = pd.DataFrame({
+        'Position': variance_per_position.index,
+        'Variance': variance_per_position.values
+    })
+
+    variance_df.to_csv(variance_path, index=False)
+    print(f"Saved variance summary to {variance_path}")
+
+    return variance_df
 
 
+def plot_variance_summary(task, seq_idx, size_label):
+    """Plot variance summary with Position on x-axis."""
+
+    csm_dir = f'results/library_size_sweep/CSM/{task}/seq_{seq_idx}/{size_label}'
+    variance_path = os.path.join(csm_dir, 'variance_summary.csv')
+    plot_path = os.path.join(csm_dir, 'variance_summary_plot.png')
+
+    # Skip if plot already exists
+    if os.path.exists(plot_path):
+        print(f"Skipping plot for {task}/seq_{seq_idx}/{size_label} - already exists")
+        return
+
+    # Check if variance summary exists
+    if not os.path.exists(variance_path):
+        print(f"Skipping plot for {task}/seq_{seq_idx}/{size_label} - variance summary not found")
+        return
+
+    # Load variance summary
+    variance_df = pd.read_csv(variance_path)
+
+    # Create plot
+    plt.figure(figsize=(12, 4))
+    plt.plot(variance_df['Position'], variance_df['Variance'], linewidth=0.8)
+    plt.xlabel('Position')
+    plt.ylabel('Variance (across clusters)')
+    plt.title(f'{task} seq_{seq_idx} - {size_label} - Entropy Variance by Position')
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved variance plot to {plot_path}")
+
+
+def plot_combined_variance_summary(task, seq_idx):
+    """Plot all variance summaries stacked vertically (7 rows, 1 column)."""
+
+    csm_base_dir = f'results/library_size_sweep/CSM/{task}/seq_{seq_idx}'
+    plot_path = os.path.join(csm_base_dir, 'variance_summary_combined.png')
+
+    # Skip if combined plot already exists
+    if os.path.exists(plot_path):
+        print(f"Skipping combined variance plot for {task}/seq_{seq_idx} - already exists")
+        return
+
+    # Load all variance summaries
+    size_order = ['100K', '75K', '50K', '25K', '10K', '5K', '1K']
+    variance_data = {}
+
+    for size_label in size_order:
+        variance_path = os.path.join(csm_base_dir, size_label, 'variance_summary.csv')
+        if os.path.exists(variance_path):
+            variance_data[size_label] = pd.read_csv(variance_path)
+
+    if len(variance_data) == 0:
+        print(f"Skipping combined variance plot for {task}/seq_{seq_idx} - no variance summaries found")
+        return
+
+    # Create figure with subplots
+    n_plots = len(variance_data)
+    fig, axes = plt.subplots(n_plots, 1, figsize=(12, 2.5 * n_plots), sharex=True)
+
+    # Handle case of single plot
+    if n_plots == 1:
+        axes = [axes]
+
+    # Get global y-axis limits for consistent scaling
+    all_variances = [df['Variance'].values for df in variance_data.values()]
+    y_max = max(v.max() for v in all_variances)
+    y_min = min(v.min() for v in all_variances)
+
+    # Plot each variance summary
+    for ax, (size_label, df) in zip(axes, variance_data.items()):
+        ax.plot(df['Position'], df['Variance'], linewidth=0.8)
+        ax.set_ylabel(f'{size_label}')
+        ax.set_ylim(y_min, y_max * 1.05)
+        ax.grid(True, alpha=0.3)
+
+    # Set common labels
+    axes[-1].set_xlabel('Position')
+    fig.suptitle(f'{task} seq_{seq_idx} - Entropy Variance by Position', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved combined variance plot to {plot_path}")
+
+
+def all_variance_files_exist(task, seq_idx):
+    """Check if all variance summary files already exist for a given task/seq."""
+    # Check combined plot
+    csm_base_dir = f'results/library_size_sweep/CSM/{task}/seq_{seq_idx}'
+    combined_plot_path = os.path.join(csm_base_dir, 'variance_summary_combined.png')
+    if not os.path.exists(combined_plot_path):
+        return False
+
+    # Check individual files
+    for size_label in subset_sizes.keys():
+        csm_dir = f'results/library_size_sweep/CSM/{task}/seq_{seq_idx}/{size_label}'
+        variance_path = os.path.join(csm_dir, 'variance_summary.csv')
+        plot_path = os.path.join(csm_dir, 'variance_summary_plot.png')
+        # Only check if MSM exists - if MSM doesn't exist, we don't need variance files
+        msm_path = os.path.join(csm_dir, 'msm.csv')
+        if os.path.exists(msm_path):
+            if not os.path.exists(variance_path) or not os.path.exists(plot_path):
+                return False
+    return True
+
+
+# Run variance summary computation and plotting for all MSMs
+for task in tasks:
+    csm_task_dir = f'results/library_size_sweep/CSM/{task}'
+
+    if not os.path.exists(csm_task_dir):
+        print(f"Skipping {task} - no CSM directory")
+        continue
+
+    seq_folders = [f for f in os.listdir(csm_task_dir) if f.startswith('seq_')]
+
+    for seq_folder in seq_folders:
+        seq_idx = int(seq_folder.split('_')[1])
+
+        # Skip if all variance files already exist
+        if all_variance_files_exist(task, seq_idx):
+            print(f"Skipping {task}/seq_{seq_idx} - all variance files already exist")
+            continue
+
+        print(f"\n{'='*50}")
+        print(f"Computing variance summaries for {task} seq_{seq_idx}")
+        print(f"{'='*50}")
+
+        for size_label in subset_sizes.keys():
+            print(f"\n--- {size_label} ---")
+            compute_and_save_variance_summary(task, seq_idx, size_label)
+            plot_variance_summary(task, seq_idx, size_label)
+
+        # Create combined variance plot after all individual plots
+        plot_combined_variance_summary(task, seq_idx)
+
+
+## Compute correlations with 100K reference using variance summaries
+def compute_library_size_correlations(task, seq_idx):
+    """Compute Pearson and Spearman correlations with 100K reference on variance summaries."""
+
+    output_dir = f'results/library_size_sweep/hyperparam_set_correlation/{task}/seq_{seq_idx}'
+    corr_path = os.path.join(output_dir, 'correlation_with_100k.csv')
+
+    # Skip if correlations already exist
+    if os.path.exists(corr_path):
+        print(f"Skipping {task}/seq_{seq_idx} - correlations already exist")
+        return None
+
+    # Load 100K reference variance summary first
+    variance_100k_path = f'results/library_size_sweep/CSM/{task}/seq_{seq_idx}/100K/variance_summary.csv'
+    if not os.path.exists(variance_100k_path):
+        print(f"Skipping {task}/seq_{seq_idx} - 100K variance summary not found")
+        return None
+
+    variance_100k = pd.read_csv(variance_100k_path)['Variance'].values
+
+    # Compute correlations with 100K for each library size
+    results = []
+    size_order = ['100K', '75K', '50K', '25K', '10K', '5K', '1K']
+
+    for size_label in size_order:
+        variance_path = f'results/library_size_sweep/CSM/{task}/seq_{seq_idx}/{size_label}/variance_summary.csv'
+        if not os.path.exists(variance_path):
+            continue
+
+        variance_df = pd.read_csv(variance_path)
+        variance_values = variance_df['Variance'].values
+
+        pearson_corr, _ = pearsonr(variance_100k, variance_values)
+        spearman_corr, _ = spearmanr(variance_100k, variance_values)
+
+        results.append({
+            'Library_Size': size_label,
+            'Size_Numeric': subset_sizes[size_label],
+            'Pearson': pearson_corr,
+            'Spearman': spearman_corr
+        })
+
+    if len(results) < 2:
+        print(f"Skipping {task}/seq_{seq_idx} - need at least 2 library sizes for correlation")
+        return None
+
+    # Create DataFrame and save
+    corr_df = pd.DataFrame(results)
+    os.makedirs(output_dir, exist_ok=True)
+    corr_df.to_csv(corr_path, index=False)
+    print(f"Saved correlations to {corr_path}")
+
+    return corr_df
+
+
+def plot_correlation_vs_library_size(task, seq_idx):
+    """Plot correlation with 100K as a function of library size."""
+
+    output_dir = f'results/library_size_sweep/hyperparam_set_correlation/{task}/seq_{seq_idx}'
+    corr_path = os.path.join(output_dir, 'correlation_with_100k.csv')
+    plot_path = os.path.join(output_dir, 'correlation_vs_library_size.png')
+
+    # Skip if plot already exists
+    if os.path.exists(plot_path):
+        print(f"Skipping correlation plot for {task}/seq_{seq_idx} - already exists")
+        return
+
+    # Check if correlation file exists
+    if not os.path.exists(corr_path):
+        print(f"Skipping correlation plot for {task}/seq_{seq_idx} - correlation file not found")
+        return
+
+    # Load correlations
+    corr_df = pd.read_csv(corr_path)
+
+    # Create plot
+    plt.figure(figsize=(8, 5))
+    plt.plot(corr_df['Size_Numeric'], corr_df['Pearson'], 'o-', label='Pearson', markersize=6)
+    plt.plot(corr_df['Size_Numeric'], corr_df['Spearman'], 's--', label='Spearman', markersize=6)
+    plt.xlabel('Library Size')
+    plt.ylabel('Correlation with 100K')
+    plt.title(f'{task} seq_{seq_idx} - Correlation with 100K vs Library Size')
+    plt.legend()
+    plt.xscale('log')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved correlation vs library size plot to {plot_path}")
+
+
+def all_correlation_files_exist(task, seq_idx):
+    """Check if all correlation output files already exist."""
+    output_dir = f'results/library_size_sweep/hyperparam_set_correlation/{task}/seq_{seq_idx}'
+    corr_path = os.path.join(output_dir, 'correlation_with_100k.csv')
+    plot_path = os.path.join(output_dir, 'correlation_vs_library_size.png')
+    return os.path.exists(corr_path) and os.path.exists(plot_path)
+
+
+def plot_combined_correlation_all_seqs(task):
+    """Plot correlation with 100K for all sequences on a single figure."""
+    output_dir = f'results/library_size_sweep/hyperparam_set_correlation/{task}'
+    plot_path = os.path.join(output_dir, 'correlation_vs_library_size_all_seqs.png')
+
+    # Skip if plot already exists
+    if os.path.exists(plot_path):
+        print(f"Skipping combined correlation plot for {task} - already exists")
+        return
+
+    # Find all sequence folders
+    csm_task_dir = f'results/library_size_sweep/CSM/{task}'
+    if not os.path.exists(csm_task_dir):
+        print(f"Skipping combined correlation plot for {task} - no CSM directory")
+        return
+
+    seq_folders = sorted([f for f in os.listdir(csm_task_dir) if f.startswith('seq_')],
+                         key=lambda x: int(x.split('_')[1]))
+
+    # Load correlation data for each sequence
+    seq_data = {}
+    for seq_folder in seq_folders:
+        seq_idx = int(seq_folder.split('_')[1])
+        corr_path = f'results/library_size_sweep/hyperparam_set_correlation/{task}/seq_{seq_idx}/correlation_with_100k.csv'
+        if os.path.exists(corr_path):
+            seq_data[seq_idx] = pd.read_csv(corr_path)
+
+    if len(seq_data) == 0:
+        print(f"Skipping combined correlation plot for {task} - no correlation files found")
+        return
+
+    # Define library size order for x-axis (excluding 100K since correlation is 1.0)
+    size_order = ['1K', '5K', '10K', '25K', '50K', '75K']
+
+    # Create plot
+    plt.figure(figsize=(10, 6))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(seq_data)))
+
+    for (seq_idx, corr_df), color in zip(sorted(seq_data.items()), colors):
+        # Filter out 100K (correlation with itself is always 1.0)
+        corr_df_filtered = corr_df[corr_df['Library_Size'] != '100K'].copy()
+
+        # Sort by the defined order
+        corr_df_filtered['Order'] = corr_df_filtered['Library_Size'].apply(lambda x: size_order.index(x) if x in size_order else -1)
+        corr_df_filtered = corr_df_filtered.sort_values('Order')
+
+        # Plot Pearson correlation (or use Spearman if preferred)
+        plt.plot(corr_df_filtered['Library_Size'], corr_df_filtered['Pearson'],
+                 'o-', label=f'seq_{seq_idx}', color=color, markersize=6, linewidth=1.5)
+
+    plt.xlabel('Library Size')
+    plt.ylabel('Pearson Correlation with 100K')
+    plt.title(f'{task} - Correlation with 100K Reference (All Sequences)')
+    plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved combined correlation plot to {plot_path}")
+
+
+# Run correlation computation and plotting for all sequences
+for task in tasks:
+    csm_task_dir = f'results/library_size_sweep/CSM/{task}'
+
+    if not os.path.exists(csm_task_dir):
+        print(f"Skipping {task} - no CSM directory")
+        continue
+
+    seq_folders = [f for f in os.listdir(csm_task_dir) if f.startswith('seq_')]
+
+    for seq_folder in seq_folders:
+        seq_idx = int(seq_folder.split('_')[1])
+
+        # Skip if all correlation files already exist
+        if all_correlation_files_exist(task, seq_idx):
+            print(f"Skipping {task}/seq_{seq_idx} - all correlation files already exist")
+            continue
+
+        print(f"\n{'='*50}")
+        print(f"Computing correlations for {task} seq_{seq_idx}")
+        print(f"{'='*50}")
+
+        compute_library_size_correlations(task, seq_idx)
+        plot_correlation_vs_library_size(task, seq_idx)
+
+    # After processing all sequences, create the combined plot
+    plot_combined_correlation_all_seqs(task)
