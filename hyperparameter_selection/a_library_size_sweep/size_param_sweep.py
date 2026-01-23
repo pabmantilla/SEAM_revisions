@@ -1,5 +1,7 @@
 # Core imports
 import os
+import sys
+import argparse
 import subprocess
 import numpy as np
 import pandas as pd
@@ -9,6 +11,14 @@ from urllib.request import urlretrieve
 import matplotlib.pyplot as plt
 from scipy.stats import spearmanr, pearsonr
 import pickle
+
+# Parse command-line arguments for SLURM array job support
+parser = argparse.ArgumentParser(description='Library size sweep for SEAM hyperparameter selection')
+parser.add_argument('--seq-idx', type=int, default=None,
+                    help='Process only this sequence index (for SLURM array jobs)')
+parser.add_argument('--finalize', action='store_true',
+                    help='Only run finalization step (combined plot across all sequences)')
+args = parser.parse_args()
 
 # TensorFlow/Keras imports for model loading
 import tensorflow as tf
@@ -251,7 +261,23 @@ def all_attributions_exist(seq_idx):
 seq_indices = dev_loci['test_idx'].tolist()
 task_index = 0  # Dev task
 
-print(f"\nProcessing {len(seq_indices)} Dev_20 sequences")
+# Handle --finalize mode: only run combined plot and exit
+if args.finalize:
+    print("Running finalization mode: generating combined correlation plot")
+    # Need to define plot_combined_correlation_all_seqs before calling it
+    # Skip to the end where it's defined and called
+    pass  # Will be handled at the end of the script
+
+# Handle --seq-idx argument: filter to single sequence for SLURM array jobs
+if args.seq_idx is not None:
+    if args.seq_idx not in seq_indices:
+        print(f"Error: seq_idx {args.seq_idx} not in Dev_20 library")
+        print(f"Available sequence indices: {seq_indices}")
+        sys.exit(1)
+    seq_indices = [args.seq_idx]
+    print(f"\nSLURM array mode: Processing only seq_{args.seq_idx}")
+else:
+    print(f"\nProcessing {len(seq_indices)} Dev_20 sequences")
 
 for seq_idx in seq_indices:
     print(f"\n{'='*50}")
@@ -857,6 +883,17 @@ def plot_combined_correlation_all_seqs():
     print(f"Saved combined correlation plot to {plot_path}")
 
 
+# Handle --finalize mode: skip all processing, just run combined plot
+if args.finalize:
+    print("\n" + "="*50)
+    print("Finalization mode: generating combined correlation plot")
+    print("="*50)
+    plot_combined_correlation_all_seqs()
+    print("\n" + "="*50)
+    print("Finalization complete!")
+    print("="*50)
+    sys.exit(0)
+
 # Run correlation computation and plotting for all sequences
 for seq_idx in seq_indices:
     # Skip if all correlation files already exist
@@ -872,7 +909,9 @@ for seq_idx in seq_indices:
     plot_correlation_vs_library_size(seq_idx)
 
 # After processing all sequences, create the combined plot
-plot_combined_correlation_all_seqs()
+# Only run if NOT in single-sequence mode (SLURM array jobs should skip this)
+if args.seq_idx is None:
+    plot_combined_correlation_all_seqs()
 
 print("\n" + "="*50)
 print("Library size sweep complete!")
