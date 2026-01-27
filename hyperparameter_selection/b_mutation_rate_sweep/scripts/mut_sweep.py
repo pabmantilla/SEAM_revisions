@@ -9,7 +9,11 @@ import time
 
 # TensorFlow/Keras imports for model loading
 import tensorflow as tf
+tf.compat.v1.disable_eager_execution()
+tf.compat.v1.disable_v2_behavior()
 from keras.models import model_from_json
+import shap
+shap.explainers.deep.deep_tf.op_handlers["AddV2"] = shap.explainers.deep.deep_tf.passthrough
 
 # SEAM imports
 import seam
@@ -28,7 +32,7 @@ import matplotlib.cm as cm
 # =============================================================================
 # Configuration
 # =============================================================================
-mutation_rates = [.75, .50, .25, .10, .05, .01]  # High to low sweep
+mutation_rates = [.75, .50, .25, 0.20, .15, .12, .10, .08, .05, .03, .01]   # High to low sweep
 lib_size = 25000
 cluster_number = 30
 task_index = 0  # Dev task
@@ -161,7 +165,6 @@ def load_library_25k(seq_idx, mut_rate):
     filepath = f'{MUTAGENESIS_LIBRARY_DIR}/Dev/seq_{seq_idx}/{mut_label}/25K.h5'
     with h5py.File(filepath, 'r') as f:
         sequences = f['sequences'][:]
-        print(len(sequences))
         predictions = f['predictions'][:]
         original_idx = f.attrs['original_idx']
         library_index = f['library_index'][:] if 'library_index' in f else np.arange(len(sequences))
@@ -215,17 +218,6 @@ def seam_deepshap(x_mut, task_index, checkpoint_path=None, checkpoint_every=5000
     keras_model_weights = os.path.join(MODEL_DIR, 'deepstarr.model.h5')
 
     try:
-        tf.compat.v1.disable_eager_execution()
-        tf.compat.v1.disable_v2_behavior()
-        print("TensorFlow eager execution disabled for DeepSHAP compatibility")
-
-        try:
-            import shap
-        except ImportError:
-            raise ImportError("SHAP package required for DeepSHAP attribution")
-
-        shap.explainers.deep.deep_tf.op_handlers["AddV2"] = shap.explainers.deep.deep_tf.passthrough
-
         keras_model = model_from_json(open(keras_model_json).read(), custom_objects={'Functional': tf.keras.Model})
         np.random.seed(113)
         random.seed(0)
@@ -375,7 +367,6 @@ def generate_and_save_msm(seq_idx, mut_rate, n_clusters=30, gpu=True):
     # Load sequences and predictions
     seqs, preds, orig_idx, library_index = load_library_25k(seq_idx, mut_rate)
 
-    print(len(labels))
     # Get reference sequence (first sequence, index 0)
     x_ref = seqs[0:1]
 
