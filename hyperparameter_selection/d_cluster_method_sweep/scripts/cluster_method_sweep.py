@@ -36,6 +36,7 @@ from scipy.stats import spearmanr, pearsonr
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -57,6 +58,13 @@ RESULTS_DIR = f'{BASE_DIR}/d_cluster_method_sweep/results'
 
 alphabet = ['A', 'C', 'G', 'T']
 
+from kmeanstf import KMeansTF
+
+print("MEMORY STATUS FOR KMEANS")
+s = KMeansTF.get_system_status()
+limit_perc = 15
+limit_bytes = 800_000_000
+print(f"{s['gpu_mem_free_perc']}% ({s['gpu_mem_free']:,} bytes).\n required: {limit_perc}% and {limit_bytes:,} bytes.\n")
 
 ############################
 # Helper functions
@@ -250,9 +258,15 @@ def cluster_and_save_kmeans(attrs, seq_idx, cluster_method, gpu=True):
 
     if cluster_method == 'kmeans':
         # Direct kmeans on flattened attribution maps
+        print(attrs.shape)
+        attrs_flat = attrs.reshape(attrs.shape[0], -1)
+        print(attrs_flat.shape)
+
         clusterer = Clusterer(attrs, gpu=gpu)
+
+
         labels = clusterer.cluster(
-            embedding=None,  # Uses flattened maps directly
+            embedding=attrs_flat,  # Uses flattened maps directly
             method='kmeans',
             n_clusters=cluster_number,
             random_state=42,
