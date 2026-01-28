@@ -839,6 +839,81 @@ def plot_all_summary_correlation_plots(seq_indices, sweep_values):
         else:
             print(f"Plot for {reference_method} method already exists")
 
+
+def check_combined_reference_plot_complete():
+    """Check if the combined 1x3 reference plot exists."""
+    plot_path = f'{RESULTS_DIR}/results_final/correlation_summary_all_references.png'
+    return os.path.exists(plot_path)
+
+
+def plot_combined_reference_summary(seq_indices, sweep_values):
+    """Plot all reference method summaries in a single 1x3 figure."""
+    # Create output directory
+    output_dir = f'{RESULTS_DIR}/results_final'
+    os.makedirs(output_dir, exist_ok=True)
+    plot_path = os.path.join(output_dir, 'correlation_summary_all_references.png')
+
+    # Create figure with 1x3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
+
+    for ax_idx, reference_method in enumerate(sweep_values):
+        ax = axes[ax_idx]
+
+        # Collect data from all sequences (compute on the fly)
+        all_data = []
+        valid_seq_indices = []
+
+        for seq_idx in seq_indices:
+            corr_df = compute_correlations_for_reference(seq_idx, reference_method, sweep_values)
+            if corr_df is not None and len(corr_df) > 1:
+                corr_df['seq_idx'] = seq_idx
+                all_data.append(corr_df)
+                valid_seq_indices.append(seq_idx)
+
+        if not all_data:
+            print(f"No correlation data found for reference {reference_method}")
+            continue
+
+        # Get method names from first dataframe
+        method_names = all_data[0]['Cluster_Method'].tolist()
+        x_positions = list(range(len(method_names)))
+
+        # Create colormap for sequences
+        n_seqs = len(valid_seq_indices)
+        colors = cm.viridis(np.linspace(0, 1, n_seqs))
+
+        # Plot each sequence as line plot
+        for i, (seq_idx, corr_df) in enumerate(zip(valid_seq_indices, all_data)):
+            ax.plot(x_positions, corr_df['Pearson'], 'o-',
+                    color=colors[i], markersize=5, linewidth=1.2, alpha=0.7)
+
+        # Mark reference method with vertical line
+        if reference_method in method_names:
+            ref_idx = method_names.index(reference_method)
+            ax.axvline(x=ref_idx, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
+
+        # Set x-axis labels
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(method_names, rotation=45, ha='right')
+
+        # Add horizontal line at correlation = 1
+        ax.axhline(y=1, color='gray', linestyle=':', alpha=0.5)
+
+        ax.set_xlabel('Cluster Method', fontsize=11)
+        if ax_idx == 0:
+            ax.set_ylabel('Pearson Correlation', fontsize=11)
+        ax.set_title(f'{reference_method} Reference', fontsize=12)
+        ax.set_ylim(0, 1.05)
+        ax.grid(True, alpha=0.3)
+
+    plt.suptitle('Correlation Summary Across All Reference Methods', fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"Saved combined reference plot to {plot_path}")
+    return plot_path
+
 def plot_combined_variance_summary(seq_idx):
     """Plot all variance summaries stacked vertically for all cluster methods."""
     msm_base_dir = f'{RESULTS_DIR}/msms/seq_{seq_idx}'
@@ -1103,4 +1178,16 @@ if __name__ == "__main__":
         print("=" * 60)
 
         plot_all_summary_correlation_plots(seq_indices, sweep_values)
+
+    # 10. Generate combined 1x3 reference plot
+    if check_combined_reference_plot_complete():
+        print("\n" + "=" * 60)
+        print("SKIPPING: Combined 1x3 reference plot already exists")
+        print("=" * 60)
+    else:
+        print("\n" + "=" * 60)
+        print("Generating combined 1x3 reference plot")
+        print("=" * 60)
+
+        plot_combined_reference_summary(seq_indices, sweep_values)
 
