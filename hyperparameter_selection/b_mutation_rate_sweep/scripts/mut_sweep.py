@@ -61,6 +61,7 @@ def check_gpu():
             print(f"  - {gpu.name}")
     else:
         print("WARNING: No GPU detected - running on CPU")
+        print(gpus)
     print("=" * 17 + "\n")
 
 
@@ -122,11 +123,16 @@ def check_msms_complete(seq_indices):
 
 
 def check_correlations_complete(seq_indices):
-    """Check if all correlation files exist for all sequences."""
+    """Check if all correlation files exist and contain all mutation rates."""
     ref_label = get_mut_label(0.10)
+    expected_rates = len(mutation_rates)
     for seq_idx in seq_indices:
         corr_path = f'{RESULTS_DIR}/correlations/seq_{seq_idx}/correlation_with_{ref_label}.csv'
         if not os.path.exists(corr_path):
+            return False
+        # Check if all mutation rates are present
+        corr_df = pd.read_csv(corr_path)
+        if len(corr_df) < expected_rates:
             return False
     return True
 
@@ -482,6 +488,66 @@ def compute_and_save_variance_summary(seq_idx, mut_rate):
     return variance_df
 
 
+def plot_combined_variance_summary(seq_idx):
+    """Plot all variance summaries stacked vertically for all mutation rates."""
+    msm_base_dir = f'{RESULTS_DIR}/msms/seq_{seq_idx}'
+    plot_path = os.path.join(msm_base_dir, 'variance_summary_combined.png')
+
+    # Skip if combined plot already exists
+    if os.path.exists(plot_path):
+        print(f"Skipping combined variance plot for seq_{seq_idx} - already exists")
+        return
+
+    # Load all variance summaries (sorted by mutation rate: high to low)
+    variance_data = {}
+    for mut_rate in mutation_rates:
+        mut_label = get_mut_label(mut_rate)
+        variance_path = os.path.join(msm_base_dir, mut_label, 'variance_summary.csv')
+        if os.path.exists(variance_path):
+            variance_data[mut_label] = pd.read_csv(variance_path)
+
+    if len(variance_data) == 0:
+        print(f"Skipping combined variance plot for seq_{seq_idx} - no variance summaries found")
+        return
+
+    # Create figure with subplots
+    n_plots = len(variance_data)
+    fig, axes = plt.subplots(n_plots, 1, figsize=(12, 2.5 * n_plots), sharex=True)
+
+    # Handle case of single plot
+    if n_plots == 1:
+        axes = [axes]
+
+    # Get global y-axis limits for consistent scaling
+    all_variances = [df['Variance'].values for df in variance_data.values()]
+    y_max = max(v.max() for v in all_variances)
+    y_min = min(v.min() for v in all_variances)
+
+    # Plot each variance summary
+    for ax, (mut_label, df) in zip(axes, variance_data.items()):
+        ax.plot(df['Position'], df['Variance'], linewidth=0.8)
+        ax.set_ylabel(f'{mut_label}')
+        ax.set_ylim(y_min, y_max * 1.05)
+        ax.grid(True, alpha=0.3)
+
+    # Set common labels
+    axes[-1].set_xlabel('Position')
+    fig.suptitle(f'Dev seq_{seq_idx} - Entropy Variance by Position', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved combined variance plot to {plot_path}")
+
+
+def check_variance_combined_plots_complete(seq_indices):
+    """Check if all combined variance summary plots exist for all sequences."""
+    for seq_idx in seq_indices:
+        plot_path = f'{RESULTS_DIR}/msms/seq_{seq_idx}/variance_summary_combined.png'
+        if not os.path.exists(plot_path):
+            return False
+    return True
+
+
 def compute_mut_rate_correlations(seq_idx, reference_mut_rate):
     """Compute Pearson and Spearman correlations with 10% reference on variance summaries."""
     reference_mut_rate = reference_mut_rate
@@ -794,7 +860,20 @@ if __name__ == "__main__":
                 # Compute variance summary
                 compute_and_save_variance_summary(seq_idx, mut_rate)
 
-    # 5. Compute correlations with 10% reference
+    # 5. Generate combined variance summary plots for each sequence
+    if check_variance_combined_plots_complete(seq_indices):
+        print("\n" + "=" * 60)
+        print("SKIPPING: All combined variance plots already exist")
+        print("=" * 60)
+    else:
+        print("\n" + "=" * 60)
+        print("Generating combined variance summary plots")
+        print("=" * 60)
+
+        for seq_idx in seq_indices:
+            plot_combined_variance_summary(seq_idx)
+
+    # 6. Compute correlations with 10% reference
     if check_correlations_complete(seq_indices):
         print("\n" + "=" * 60)
         print("SKIPPING: All correlation files already exist")
@@ -808,7 +887,7 @@ if __name__ == "__main__":
             print(f"\nComputing correlations for seq_{seq_idx}")
             compute_mut_rate_correlations(seq_idx, reference_mut_rate=reference_mut_rate)
 
-    # 6. Generate individual correlation plots for each sequence
+    # 7. Generate individual correlation plots for each sequence
     if check_correlation_plots_complete(seq_indices):
         print("\n" + "=" * 60)
         print("SKIPPING: All individual correlation plots already exist")
@@ -819,9 +898,9 @@ if __name__ == "__main__":
         print("=" * 60)
 
         for seq_idx in seq_indices:
-            plot_correlation_for_seq(seq_idx)
+            plot_correlation_for_seq(seq_idx, reference_mut_rate=reference_mut_rate)
 
-    # 7. Generate summary plot with all sequences
+    # 8. Generate summary plot with all sequences
     if check_summary_plot_complete():
         print("\n" + "=" * 60)
         print("SKIPPING: Summary correlation plot already exists")
